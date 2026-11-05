@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>宝可梦对战沙盘</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="topbar">
+	<div class="brand">宝可梦对战沙盘</div>
+	<label>格式 <select id="format"></select></label>
+	<span id="engine-info" class="muted"></span>
+	<span id="session-info" class="muted"></span>
+	<div class="spacer"></div>
+	<button id="btn-settings">设置</button>
+	<button id="btn-new">新建</button>
+	<button id="btn-export">导出</button>
+	<label class="filelabel">导入<input type="file" id="file-import" accept=".json"></label>
+</header>
+<main id="layout">
+	<section class="side" id="side-p1"></section>
+	<section id="mid"></section>
+	<section class="side" id="side-p2"></section>
+</main>
+<div id="settings" hidden>
+	<div class="sheet" role="dialog" aria-label="设置">
+		<div class="sheet-head">设置<button id="settings-close">关闭</button></div>
+		<div class="sheet-tabs">
+			<button id="tab-ui" class="cur">界面设置</button>
+			<button id="tab-data">数据设置</button>
+		</div>
+		<div class="sheet-body">
+			<div id="settings-ui">
+				<p class="hint">分别控制红方（P1）与蓝方（P2）面板显示的内容。隐藏只影响界面展示，不改变数值与结算结果。</p>
+				<div id="settings-body"></div>
+			</div>
+			<div id="settings-data" hidden>
+				<div class="fieldset">
+					<div class="fshead">引擎与数据存放位置</div>
+					<div class="pathrow">
+						<input id="engine-path" type="text" readonly>
+						<button id="btn-engine-move">更改位置…</button>
+					</div>
+					<p class="hint">引擎、全部宝可梦数据与中文文本都在该目录。更改位置会把整个目录移动到所选位置下的 engine 文件夹，之后启动也会从新位置读取。</p>
+					<div id="engine-meta" class="hint"></div>
+				</div>
+				<div class="fieldset">
+					<div class="fshead">更新引擎与数据</div>
+					<p class="hint">点击后先查询 GitHub（smogon/pokemon-showdown）是否有新提交：有更新就下载源码、重新编译并替换本地引擎与数据；没有更新会提示「已是最新版本」。首次使用会先建立版本基准。</p>
+					<div class="pathrow">
+						<button id="btn-engine-update" class="primary">检查并更新</button>
+					</div>
+					<div id="engine-update-status" class="hint">尚未检查更新</div>
+					<div id="engine-progress" hidden>
+						<div class="progress-track"><div id="engine-progress-bar"></div></div>
+						<div id="engine-progress-text" class="hint"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+<div id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

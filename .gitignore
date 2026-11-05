@@ -1,0 +1,10 @@
+# 以下全部由 build.bat / build.sh 在运行时联网下载或生成，不随构建包分发
+.runtime/
+node_modules/
+pokemon-showdown-master/
+.cache/
+build/
+release/
+*.tar.gz
+*.zip
+*.log

@@ -1,0 +1,11 @@
+{
+  "npmRegistry": "https://registry.npmmirror.com",
+  "npmRegistryOfficial": "https://registry.npmjs.org",
+  "pokemonShowdown": {
+    "repo": "smogon/pokemon-showdown",
+    "ref": "master",
+    "_comment": "想固定引擎版本，把 ref 改成某个 commit sha 或 tag；也可用 --ps-ref 覆盖"
+  },
+  "githubApi": "https://api.github.com",
+  "codeload": "https://codeload.github.com"
+}

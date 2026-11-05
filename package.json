@@ -1,0 +1,106 @@
+{
+  "name": "pokemon-battle-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Pokemon battle sandbox driven by the Pokemon Showdown engine",
+  "author": "PokemonBattleSim",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build:engine": "node tools/build-engine.cjs",
+    "start": "node app/server.cjs",
+    "electron": "electron .",
+    "host": "node engine-host/host.cjs",
+    "pack:win": "electron-builder --win --x64 --dir",
+    "dist:win": "electron-builder --win --x64",
+    "kit:setup": "node bootstrap.cjs --setup-only",
+    "build:installer": "node bootstrap.cjs",
+    "dist:all": "node bootstrap.cjs --os all --arch all",
+    "dist:linux": "node bootstrap.cjs --os linux --arch all",
+    "dist:ohos": "node tools/build-ohos.cjs",
+    "run:ohos": "node app/server.cjs",
+    "test:session": "node spike/session-test.cjs",
+    "test:switch": "node spike/switch-test.cjs",
+    "test:host": "node spike/host-test.cjs",
+    "test:e2e": "node spike/e2e-ui-test.mjs",
+    "test:ipc": "node spike/electron-ipc-test.cjs",
+    "test:ohos": "node spike/ohos-config-test.cjs",
+    "test:ui": "node spike/ui-smoke.cjs",
+    "test:volatile": "node spike/volatile-test.cjs"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "build": {
+    "appId": "local.pokemon.battlesim",
+    "productName": "PokemonBattleSim",
+    "copyright": "Pokemon Showdown engine is MIT licensed; Pokemon is a trademark of Nintendo / Game Freak.",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "app/**/*",
+      "engine-host/**/*",
+      "tools/build-engine.cjs",
+      "package.json",
+      "!**/*.map",
+      "!**/node_modules/**/{test,__tests__}/**"
+    ],
+    "extraResources": [
+      {
+        "from": "pokemon-showdown-master",
+        "to": "engine",
+        "filter": [
+          "dist/**/*",
+          "package.json",
+          "LICENSE"
+        ]
+      },
+      {
+        "from": "pokemon-showdown-master/node_modules/ts-chacha20",
+        "to": "engine/node_modules/ts-chacha20"
+      },
+      {
+        "from": "node_modules/esbuild-wasm",
+        "to": "engine-build/esbuild-wasm"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "宝可梦对战沙盘",
+      "artifactName": "PokemonBattleSim-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "PokemonBattleSim-Portable-${version}-${arch}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
+    "esbuild-wasm": "^0.25.0",
+    "jsdom": "^29.1.1"
+  }
+}
