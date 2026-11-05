@@ -25,7 +25,8 @@
     "test:ipc": "node spike/electron-ipc-test.cjs",
     "test:ohos": "node spike/ohos-config-test.cjs",
     "test:ui": "node spike/ui-smoke.cjs",
-    "test:volatile": "node spike/volatile-test.cjs"
+    "test:volatile": "node spike/volatile-test.cjs",
+    "test:struggle": "node spike/struggle-test.cjs"
   },
   "engines": {
     "node": ">=22.18.0"

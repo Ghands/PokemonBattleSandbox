@@ -35,12 +35,16 @@ class Inbox {
 		}
 	}
 
-	async next(predicate, timeoutMs = 15000) {
+	async next(predicate, timeoutMs = 15000, check = null) {
 		const deadline = Date.now() + timeoutMs;
 		for (;;) {
 			while (this.cursor < this.lines.length) {
 				const line = this.lines[this.cursor++];
 				if (predicate(line)) return line;
+			}
+			if (check) {
+				const err = check();
+				if (err) throw err;
 			}
 			if (this.error) throw this.error;
 			if (this.ended) return null;
@@ -361,9 +365,21 @@ class BattleSession {
 			return mon ? this.battle.sides[sideIndex].pokemon.indexOf(mon) + 1 : 0;
 		};
 
+		// Statuses added earlier (Encore/Torment/Disable/Taunt/...) can make the
+		// UI's move index illegal. Use the engine's own request as the source of
+		// truth, falling back to a legal move - or Struggle when none is usable.
+		const legal = {
+			p1: this._legalizeChoice('p1', 0, choices.p1),
+			p2: this._legalizeChoice('p2', 1, choices.p2),
+		};
+		this._choiceErrorCursor = {
+			p1: this.inbox.p1.lines.length,
+			p2: this.inbox.p2.lines.length,
+		};
+
 		try {
-			this.streams.p1.write(choiceToString(choices.p1, slot => switchPos(0, slot)));
-			this.streams.p2.write(choiceToString(choices.p2, slot => switchPos(1, slot)));
+			this.streams.p1.write(choiceToString(legal.p1, slot => switchPos(0, slot)));
+			this.streams.p2.write(choiceToString(legal.p2, slot => switchPos(1, slot)));
 		} catch (err) {
 			throw new Error(`invalid choice: ${err.message}`);
 		}
@@ -427,8 +443,64 @@ class BattleSession {
 		return null;
 	}
 
+	/**
+	 * A rejected choice never produces a new |request| line, so waiting for one
+	 * would hang until the 15s timeout. Surface the engine's error immediately.
+	 */
+	_choiceError() {
+		for (const key of ['p1', 'p2']) {
+			const box = this.inbox[key];
+			for (let i = this._choiceErrorCursor?.[key] ?? 0; i < box.lines.length; i++) {
+				const line = box.lines[i];
+				if (/^\|error\|\[(Unavailable|Invalid) choice\]/.test(line)) {
+					return new Error(line.slice('|error|'.length));
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Translate the UI's move index into a choice the engine will accept.
+	 *
+	 * The request emitted at the start of the turn is authoritative: entries
+	 * can be `disabled` (Encore, Torment, Taunt, no PP...) and when none are
+	 * usable it holds a single `struggle` entry. Sending a stale index makes
+	 * the engine reply with |error|[Unavailable choice] without running the
+	 * turn, which used to show up in the app as a timeout.
+	 */
+	_legalizeChoice(sideKey, sideIndex, choice) {
+		if (!choice || choice.kind !== 'move') return choice;
+		const side = this.battle.sides[sideIndex];
+		const mon = side?.active?.[0];
+		const req = side?.activeRequest?.active?.[0] || this.requests?.[sideKey]?.active?.[0];
+		const moves = req?.moves;
+		if (!mon || !moves?.length) return choice;
+
+		const picked = mon.moveSlots[choice.index];
+		const wanted = picked ? moves.findIndex(m => m.id === picked.id) : -1;
+		const fallback = moves.findIndex(m => !m.disabled && m.id !== 'struggle');
+
+		if (fallback < 0) {
+			// Encore + Torment (or Disable/Taunt/no PP) leaves no legal move.
+			// `move 1` maps to the struggle entry and the engine does the rest.
+			const struggle = moves.findIndex(m => m.id === 'struggle');
+			this.warnings.push(`${mon.name} 无可用招式，本次行动改为挣扎`);
+			return { kind: 'move', index: struggle < 0 ? 0 : struggle, tera: false };
+		}
+		if (wanted >= 0 && !moves[wanted].disabled) {
+			if (!choice.tera || req.canTerastallize) return choice;
+			return { kind: 'move', index: choice.index, tera: false };
+		}
+
+		this.warnings.push(
+			`${mon.name} 的${picked ? ` ${picked.move} ` : '所选招式'}当前不可用，已自动改用 ${moves[fallback].move}`
+		);
+		return { kind: 'move', index: fallback, tera: false };
+	}
+
 	async _nextRequest(sideKey) {
-		const line = await this.inbox[sideKey].next(isRequest);
+		const line = await this.inbox[sideKey].next(isRequest, 15000, () => this._choiceError());
 		return line ? parseRequest(line) : null;
 	}
 
