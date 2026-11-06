@@ -20,6 +20,7 @@ const path = require('path');
 const https = require('https');
 const zlib = require('zlib');
 const { spawnSync } = require('child_process');
+const buildEnv = require('./build-env.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const NODE = process.execPath;
@@ -381,6 +382,83 @@ function buildConfig(pkg, os, arch, targets, outDir) {
 	return config;
 }
 
+/* ------------------------- Windows 文件占用容错 ------------------------- */
+
+const STAGE_ROOT = path.join(ROOT, '.cache', 'extra-resources');
+let stagedOnce = false;
+
+/**
+ * 把 extraResources 的源先复制到一个干净的暂存区，再让 electron-builder 从暂存区
+ * 拷贝。原因：源目录（pokemon-showdown-master/dist、node_modules/esbuild-wasm）常
+ * 被杀毒实时防护/索引服务扫描，fs.copyFileSync（copyfile）以独占方式打开源文件时
+ * 会 EBUSY；这里改用共享读 + 临时文件 + 原子改名，并跳过内容未变的文件。
+ *
+ * 注意：仅修改传入的 config.extraResources 是不够的。electron-builder 的
+ * deepAssign 对数组采用 concat 合并，package.json 的 build.extraResources 仍会
+ * 一起生效，于是 esbuild.wasm 依旧从 node_modules 直拷并触发 EBUSY。真正生效
+ * 的做法是 writeEffectiveConfig()：把完整配置写成独立文件，以 config 字符串
+ * 传给 build()，此时 electron-builder 不再读取 package.json 的 build 字段。
+ */
+function stageExtraResources(config) {
+	// ts-chacha20 必须作为独立的一条 extraResources：electron-builder 会过滤
+	// extraResources 里路径含 node_modules 的子目录，塞进 engine/ 内部会静默丢失。
+	const jobs = [
+		{ from: path.join(ENGINE_DIR, 'dist'), to: 'engine/dist' },
+		{ from: ENGINE_DEP, to: 'ts-chacha20' },
+		{ from: path.join(ROOT, 'node_modules', 'esbuild-wasm'), to: 'engine-build/esbuild-wasm' },
+	];
+	let copied = 0, skipped = 0;
+	for (const job of jobs) {
+		if (!fs.existsSync(job.from)) continue;
+		const r = buildEnv.copyDirResilient(job.from, path.join(STAGE_ROOT, job.to));
+		copied += r.copied;
+		skipped += r.skipped;
+	}
+	for (const f of ['package.json', 'LICENSE']) {
+		const src = path.join(ENGINE_DIR, f);
+		if (!fs.existsSync(src)) continue;
+		const r = buildEnv.copyFileResilient(src, path.join(STAGE_ROOT, 'engine', f));
+		if (r === 'skipped') skipped++; else copied++;
+	}
+	// 用绝对路径，避免配置文件落在 .cache/ 后产生相对基准歧义。
+	const abs = rel => path.join(STAGE_ROOT, rel).replace(/\\/g, '/');
+	config.extraResources = [
+		// 历史暂存可能残留 engine/node_modules，显式排除。
+		{ from: abs('engine'), to: 'engine', filter: ['**/*', '!node_modules/**/*'] },
+		{ from: abs('ts-chacha20'), to: 'engine/node_modules/ts-chacha20' },
+		{ from: abs('engine-build'), to: 'engine-build' },
+	];
+	if (!stagedOnce) {
+		ok(`extraResources 已从干净暂存区读取（新增 ${copied} / 复用 ${skipped} 个文件）`);
+		stagedOnce = true;
+	}
+}
+
+/**
+ * 把最终配置写成独立的 JSON 文件，并以「文件路径」而非「配置对象」传给
+ * electron-builder。传对象时它会与 package.json 的 build 字段做 deepAssign，
+ * 数组是 concat 合并——暂存区条目只是追加，package.json 里指向
+ * node_modules/esbuild-wasm 的旧条目仍会执行并触发 EBUSY。
+ * 每次写唯一文件名，绝不覆盖已有文件，从根上避开 copyfile 目标锁。
+ */
+function writeEffectiveConfig(config, os, arch) {
+	const dir = path.join(ROOT, '.cache', 'builder-config');
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, `electron-builder-${os}-${arch}-${process.pid}-${Date.now()}.json`);
+	fs.writeFileSync(file, JSON.stringify(config, null, 2), 'utf8');
+	return file;
+}
+
+/** 打包前检查输出目录里是否已有被独占锁定的文件，提前给出可操作的提示。 */
+function auditOutputLocks(outDir, unpackedName) {
+	const locked = buildEnv.findLockedFiles(path.join(outDir, unpackedName, 'resources'));
+	if (!locked.length) return;
+	warn(`输出目录中有 ${locked.length} 个文件正被占用，覆盖它们会失败：`);
+	for (const f of locked.slice(0, 8)) warn(`  ${path.relative(outDir, f)}`);
+	warn('常见持有者：正在运行的 PokemonBattleSim.exe、杀毒实时防护、网盘/OneDrive 同步。');
+	warn('请关闭后重试，或用 --out <全新目录>；被独占锁定的文件原地重试永远不会解锁。');
+}
+
 /**
  * 产物清单：以 electron-builder 返回的制品路径为准，额外补上免安装目录的主程序。
  * 只按时间戳扫描会混入上一个组合刚生成的文件，所以只在 produced 为空（dir 模式）时兜底扫描。
@@ -428,6 +506,15 @@ async function buildOne(builder, pkg, os, arch, targets, outDir, opts) {
 	const archEnum = builder.Arch[arch];
 	if (typeof archEnum !== 'number') fail(`无法解析架构: ${arch}`);
 	const targetsMap = platform.createTarget(targets, archEnum);
+	const unpackedName = os === 'windows'
+		? (arch === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked')
+		: (arch === 'x64' ? 'linux-unpacked' : 'linux-arm64-unpacked');
+
+	if (!opts.dryRun) {
+		try { stageExtraResources(config); }
+		catch (e) { warn(`extraResources 暂存失败，改用原目录直接拷贝：${e.message}`); }
+		auditOutputLocks(outDir, unpackedName);
+	}
 
 	if (opts.dryRun) {
 		ok(`electron-builder.build({ platform=${os}, arch=${arch}, targets=[${targets.join(', ')}] })`);
@@ -435,15 +522,24 @@ async function buildOne(builder, pkg, os, arch, targets, outDir, opts) {
 		return { os, arch, targets, outDir, artifacts: [], ms: 0, dryRun: true };
 	}
 
+	const configPath = writeEffectiveConfig(config, os, arch);
+	ok(`electron-builder 使用独立配置：${path.relative(ROOT, configPath)}`);
+
 	let produced = [];
 	try {
-		produced = await builder.build({ config, targets: targetsMap, projectDir: ROOT });
+		// config 传字符串路径：electron-builder 只读取该文件，不再合并 package.json
+		// 的 build 字段，暂存区 extraResources 才能完全取代旧条目。
+		produced = await builder.build({ config: configPath, targets: targetsMap, projectDir: ROOT });
 	} catch (err) {
-		throw new Error(`${os}/${arch} 构建失败: ${err && err.message || err}`);
+		const msg = err && err.message || String(err);
+		let hint = '';
+		if (buildEnv.isTransientFsError(err)) {
+			const locked = buildEnv.findLockedFiles(path.join(outDir, unpackedName, 'resources'));
+			hint = `\n  文件占用诊断：${locked.length ? `以下文件仍被锁定 ${locked.slice(0, 5).join(', ')}` : '未发现持久锁定，可能是瞬时占用'}` +
+				'\n  被独占锁定的文件无法覆盖/改名/删除，原地重试不会解锁；请关闭正在运行的客户端与杀毒实时防护，或用 --out <全新目录> 重新打包。';
+		}
+		throw new Error(`${os}/${arch} 构建失败: ${msg}${hint}`);
 	}
-	const unpackedName = os === 'windows'
-		? (arch === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked')
-		: (arch === 'x64' ? 'linux-unpacked' : 'linux-arm64-unpacked');
 	const artifacts = collectArtifacts(outDir, started, produced, unpackedName);
 	ok(`完成，用时 ${((Date.now() - started) / 1000).toFixed(0)}s，产物 ${artifacts.length} 项`);
 	for (const a of artifacts) ok(`  ${a.file.padEnd(52)} ${sizeMb(a.size)}`);
@@ -457,6 +553,10 @@ async function main() {
 	try { opts = parseArgs(process.argv.slice(2)); }
 	catch (e) { console.error(`\n参数错误: ${e.message}\n`); process.exit(2); }
 	if (opts.help) { console.log(HELP); return; }
+
+	// 直接调用本脚本（不经过 build.bat / bootstrap.cjs）时也要保证便携 Node 在
+	// PATH 上，否则 electron-builder 拉起的子进程与生命周期脚本找不到 node。
+	buildEnv.applyNodeOnPath(process.env);
 
 	const combos = [];
 	for (const os of opts.os) for (const arch of opts.arch) {

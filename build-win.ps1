@@ -85,8 +85,22 @@ Write-Host '========================================' -ForegroundColor DarkGray
 # ---------------------------------------------------------------- 环境检查
 Write-Step '检查运行环境'
 
+# 便携 Node（build.bat 下载的 .runtime\node）不在系统 PATH 时，先补上；
+# 否则 npm 生命周期脚本与 esbuild-wasm 的 spawn('node') 都找不到 node 命令。
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Fail '未找到 Node.js。请安装 Node.js 22.18 或更高版本：https://nodejs.org/'
+    $portableNode = if ($env:PBSIM_NODE -and (Test-Path -LiteralPath $env:PBSIM_NODE)) {
+        $env:PBSIM_NODE
+    } else {
+        Join-Path $PSScriptRoot '.runtime\node\node.exe'
+    }
+    if (Test-Path -LiteralPath $portableNode) {
+        $env:PATH = (Split-Path -Parent $portableNode) + ';' + $env:PATH
+        Write-Host "    使用便携 Node：$portableNode" -ForegroundColor DarkGray
+    }
+}
+
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Fail '未找到 Node.js。请先运行 build.bat（会自动下载便携 Node），或安装 Node.js 22.18+：https://nodejs.org/'
 }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     Fail '未找到 npm。请重新安装 Node.js（安装包自带 npm）。'

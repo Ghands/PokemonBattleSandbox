@@ -11,6 +11,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const buildEnv = require('./build-env.cjs');
+
+// esbuild-wasm 固定用 child_process.spawn('node', ['bin/esbuild', ...]) 启动服务，
+// 便携 Node 不在 PATH 时会 ENOENT。先把当前 node 目录前置到 PATH；若宿主是
+// 已打包客户端（没有 node 命令），再装一层 spawn 重定向兜底。
+buildEnv.applyNodeOnPath(process.env);
+buildEnv.installNodeSpawnFallback();
 
 const engineDir = path.resolve(process.argv[2] || path.join(__dirname, '..', 'pokemon-showdown-master'));
 const distDir = path.join(engineDir, 'dist');
@@ -50,8 +57,9 @@ function copyDataJSON(dir) {
 			copyDataJSON(cur);
 		} else if (f.endsWith('.json')) {
 			const dest = path.join(distDir, rel);
-			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.copyFileSync(cur, dest);
+			// 不用 fs.copyFileSync：Windows 上 copyfile 直接打开目标文件，
+			// 刚编译出的 dist 被杀毒/索引服务占用时会 EBUSY 且原地重试无解。
+			buildEnv.copyFileResilient(cur, dest);
 		}
 	}
 }
@@ -62,26 +70,33 @@ async function main() {
 	console.log(`[build] ${entryPoints.length} TypeScript entries`);
 
 	process.chdir(engineDir);
-	await esbuild.build({
-		entryPoints,
-		outdir: './dist',
-		outbase: '.',
-		format: 'cjs',
-		target: 'es2020',
-		platform: 'node',
-		tsconfig: './tsconfig.json',
-		sourcemap: false,
-		logLevel: 'warning',
-		absWorkingDir: engineDir,
-	});
+	try {
+		await esbuild.build({
+			entryPoints,
+			outdir: './dist',
+			outbase: '.',
+			format: 'cjs',
+			target: 'es2020',
+			platform: 'node',
+			tsconfig: './tsconfig.json',
+			sourcemap: false,
+			logLevel: 'warning',
+			absWorkingDir: engineDir,
+		});
+	} finally {
+		// esbuild-wasm 会 spawn 一个 unref 的 `node bin/esbuild --service` 长驻进程。
+		// 不显式停掉，它可能继续持有引擎目录/esbuild.wasm，随后的复制与打包容易撞锁。
+		if (typeof esbuild.stop === 'function') {
+			try { await esbuild.stop(); } catch { /* 服务已退出 */ }
+		}
+	}
 
 	console.log('[build] copying data JSON...');
 	copyDataJSON(path.join(engineDir, 'data'));
 
 	const cfgExample = path.join(engineDir, 'config', 'config-example.js');
 	const cfgDest = path.join(distDir, 'config', 'config-example.js');
-	fs.mkdirSync(path.dirname(cfgDest), { recursive: true });
-	fs.copyFileSync(cfgExample, cfgDest);
+	buildEnv.copyFileResilient(cfgExample, cfgDest);
 
 	const entry = path.join(distDir, 'sim', 'index.js');
 	if (!fs.existsSync(entry)) throw new Error(`build produced no entry: ${entry}`);

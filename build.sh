@@ -60,4 +60,7 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 
 echo "[kit] Node: $NODE_BIN"
+# 便携 Node 不在 PATH 时，npm 生命周期脚本与 esbuild-wasm 的 spawn('node')
+# 都找不到 node；把它的目录前置到整条链路的 PATH。
+export PATH="$(dirname "$NODE_BIN"):$PATH"
 exec "$NODE_BIN" "$KIT/bootstrap.cjs" "$@"

@@ -5,7 +5,7 @@ node_modules/
 pokemon-showdown-master/
 .cache/
 build/
-release/
+release*/
 *.tar.gz
 *.zip
 *.log

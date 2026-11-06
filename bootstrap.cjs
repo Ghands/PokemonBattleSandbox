@@ -24,6 +24,7 @@ const path = require('path');
 const https = require('https');
 const zlib = require('zlib');
 const { spawn, spawnSync } = require('child_process');
+const buildEnv = require('./tools/build-env.cjs');
 
 const ROOT = __dirname;
 const ENGINE_DIR = path.join(ROOT, 'pokemon-showdown-master');
@@ -373,8 +374,9 @@ function ensureIcons() {
 
 /**
  * 实时回显编译脚本输出，同时保留尾部日志用于判断失败类型。
- * Windows 上刚编译出来的 dist 文件可能被杀毒软件/索引服务短暂占用，
- * electron-builder 拷贝 extraResources 时会抛 EBUSY，这类错误重试即可。
+ * Windows 上 electron-builder 拷贝 extraResources 时会抛 copyfile/EBUSY；
+ * 这类错误分「瞬时」（杀毒扫描）与「持久」（客户端正在运行）两种，后者原地
+ * 重试永远不会解锁，必须换输出目录，见 runBuildInstaller。
  */
 function runNodeCapture(script, args) {
 	return new Promise((resolve, reject) => {
@@ -394,7 +396,7 @@ function runNodeCapture(script, args) {
 	});
 }
 
-const TRANSIENT_FS_ERROR = /EBUSY|EPERM|resource busy or locked|os error 32|operation did not complete/i;
+const TRANSIENT_FS_ERROR = /EBUSY|EPERM|resource busy or locked|os error 32|operation did not complete|sharing violation|另一个程序正在使用|copyfile/i;
 
 /**
  * 提前编译引擎 dist：这样进入 electron-builder 的拷贝阶段时，
@@ -415,19 +417,59 @@ async function ensureEngineDist() {
 	await sleep(3000);
 }
 
+/** 从透传参数里读出输出目录（build-installer.cjs 以后出现的 --out 为准）。 */
+function outDirFromArgs(args) {
+	let out = 'release';
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === '-o' || a === '--out') out = args[i + 1] || out;
+		else if (a.startsWith('--out=')) out = a.slice(6);
+		else if (a.startsWith('-o=')) out = a.slice(3);
+	}
+	return out;
+}
+
+/**
+ * 打包重试策略：
+ *   1) 正常构建；
+ *   2) 遇到占用，短暂等待后在原目录重试一次（针对杀毒/索引的瞬时锁）；
+ *   3) 仍失败说明是持久锁（正在运行的客户端、同步盘等），换一个全新输出目录。
+ *      Windows 上被独占锁定的文件无法覆盖、无法改名、无法删除，原地重试再多次
+ *      也不会解锁，只有写到新路径才能成功。
+ * 返回最终产物目录。
+ */
 async function runBuildInstaller(args) {
 	const script = path.join(ROOT, 'tools/build-installer.cjs');
-	const MAX_ATTEMPTS = 5;
+	const baseOut = outDirFromArgs(args);
+	const MAX_ATTEMPTS = 3;
+	let finalOut = baseOut;
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-		step(attempt === 1
-			? '调用 tools/build-installer.cjs 生成安装包'
-			: `重试打包（第 ${attempt - 1} 次，上一次是瞬时文件占用）`);
-		const { code, tail } = await runNodeCapture(script, args);
-		if (code === 0) return;
+		let runArgs = args;
+		if (attempt === 1) {
+			step('调用 tools/build-installer.cjs 生成安装包');
+		} else if (attempt === MAX_ATTEMPTS) {
+			finalOut = buildEnv.freshOutDir(baseOut, 1);
+			step(`文件被持久占用，改用全新输出目录 ${finalOut}（原 ${baseOut} 保持不动）`);
+			runArgs = [...args, '--out', finalOut];
+		} else {
+			step(`重试打包（第 ${attempt - 1} 次，上一次是文件占用）`);
+		}
+
+		const { code, tail } = await runNodeCapture(script, runArgs);
+		if (code === 0) return path.resolve(ROOT, finalOut);
+
 		if (attempt < MAX_ATTEMPTS && TRANSIENT_FS_ERROR.test(tail)) {
-			warn(`检测到 Windows 瞬时文件占用，等待 ${attempt * 3} 秒后重试（${attempt}/${MAX_ATTEMPTS - 1}）`);
+			const locked = buildEnv.findLockedFiles(path.resolve(ROOT, finalOut));
+			if (locked.length) {
+				warn(`输出目录里有 ${locked.length} 个文件仍被占用（原地重试通常无效）：`);
+				for (const f of locked) warn(`  ${path.relative(ROOT, f)}`);
+			}
+			warn(`等待 ${attempt * 3} 秒后重试（${attempt}/${MAX_ATTEMPTS - 1}）`);
 			await sleep(attempt * 3000);
 			continue;
+		}
+		if (TRANSIENT_FS_ERROR.test(tail)) {
+			fail(`构建失败（退出码 ${code}）：Windows 文件被持久占用，已尝试原地重试和全新输出目录仍未成功。请关闭正在运行的 PokemonBattleSim.exe、杀毒软件实时防护或网盘同步后重试。`);
 		}
 		fail(`构建失败（退出码 ${code}）`);
 	}
@@ -441,6 +483,7 @@ function printHeader(o, cfg, minNode, psRepo, psRef, registry) {
 	console.log('========================================');
 	console.log(` 目录:     ${ROOT}`);
 	console.log(` Node:     v${process.versions.node}（要求 >= v${minNode}）`);
+	console.log(` Node PATH:${buildEnv.nodeCommandResolvable() ? '已注入 ' + buildEnv.nodeDir() : '未找到（依赖安装可能失败）'}`);
 	console.log(` npm 源:   ${registry}`);
 	console.log(` 引擎源:   ${psRepo} @ ${psRef}`);
 	console.log(` 构建参数: ${o.forward.join(' ') || '(默认：当前系统 / 当前架构)'}`);
@@ -453,6 +496,15 @@ async function main() {
 
 	// 宿主注入的 ELECTRON_RUN_AS_NODE 会让 electron-builder 误判，整个链路里清掉。
 	delete process.env.ELECTRON_RUN_AS_NODE;
+
+	// 便携 Node 只存在于 .runtime/node/，不会自动进系统 PATH。npm 生命周期脚本
+	// （electron-winstaller 的 "install": "node ./script/select-7z-arch.js"）和
+	// esbuild-wasm 的 spawn('node', ['bin/esbuild', ...]) 都靠裸 node 命令，
+	// 必须在所有子进程启动前把当前 node 所在目录前置到 PATH。
+	buildEnv.applyNodeOnPath(process.env);
+	if (!buildEnv.nodeCommandResolvable(process.env)) {
+		warn('PATH 中仍找不到 node 命令，依赖安装 / 引擎编译可能失败；可设置 PBSIM_NODE 指向官方 Node 发行版');
+	}
 
 	const pkg = readJson(PKG, {});
 	const minNode = ((pkg.engines && pkg.engines.node) || '>=22.18.0').match(/(\d+)\.(\d+)\.(\d+)/);
@@ -497,8 +549,8 @@ async function main() {
 		return;
 	}
 
-	await runBuildInstaller(o.forward);
-	console.log('\n完成。产物位于 release/（或 --out 指定目录）。\n');
+	const outDir = await runBuildInstaller(o.forward);
+	console.log(`\n完成。产物位于 ${path.relative(ROOT, outDir) || outDir}/。\n`);
 }
 
 if (require.main === module) {
@@ -510,5 +562,5 @@ if (require.main === module) {
 
 module.exports = {
 	ROOT, DEFAULTS, parseArgs, request, extractTarGz, safeJoin,
-	cmpVersion, depsReady, engineReady, findNpmCli, readJson,
+	cmpVersion, depsReady, engineReady, findNpmCli, readJson, outDirFromArgs,
 };

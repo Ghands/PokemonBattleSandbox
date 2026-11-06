@@ -20,6 +20,7 @@ const os = require('os');
 const zlib = require('zlib');
 const https = require('https');
 const { spawn, spawnSync } = require('child_process');
+const buildEnv = require('../tools/build-env.cjs');
 
 const REPO = 'smogon/pokemon-showdown';
 const BRANCH = 'master';
@@ -349,10 +350,12 @@ function createEngineManager(options = {}) {
 		const hadDist = fs.existsSync(dist);
 		if (hadDist) fs.renameSync(dist, backup);
 		try {
-			fs.cpSync(newDist, dist, { recursive: true, force: true });
+			// 不用 fs.cpSync/copyFileSync：Windows 上 copyfile 直接打开目标文件，
+			// 旧 dist 被杀毒/索引服务占用时会 EBUSY，且原地重试无法解锁。
+			buildEnv.copyDirResilient(newDist, dist);
 			for (const file of ['package.json', 'LICENSE']) {
 				const src = path.join(repoDir, file);
-				if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, file));
+				if (fs.existsSync(src)) buildEnv.copyFileResilient(src, path.join(dir, file));
 			}
 			verifyDist(dist);
 			writeMeta(meta, dir);

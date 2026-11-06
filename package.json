@@ -26,7 +26,8 @@
     "test:ohos": "node spike/ohos-config-test.cjs",
     "test:ui": "node spike/ui-smoke.cjs",
     "test:volatile": "node spike/volatile-test.cjs",
-    "test:struggle": "node spike/struggle-test.cjs"
+    "test:struggle": "node spike/struggle-test.cjs",
+    "test:buildenv": "node spike/build-env-test.cjs"
   },
   "engines": {
     "node": ">=22.18.0"
@@ -45,6 +46,7 @@
       "app/**/*",
       "engine-host/**/*",
       "tools/build-engine.cjs",
+      "tools/build-env.cjs",
       "package.json",
       "!**/*.map",
       "!**/node_modules/**/{test,__tests__}/**"

@@ -42,6 +42,10 @@ if errorlevel 1 exit /b 1
 
 :run
 echo [kit] Node: "%NODE_EXE%"
+rem Portable Node is not on PATH. npm lifecycle scripts and esbuild-wasm
+rem launch a bare node command, so prepend its folder for the whole chain.
+for %%i in ("%NODE_EXE%") do set "NODE_DIR=%%~dpi"
+set "PATH=%NODE_DIR%;%PATH%"
 "%NODE_EXE%" "%KIT%bootstrap.cjs" %*
 set "CODE=%ERRORLEVEL%"
 if not "%CODE%"=="0" (

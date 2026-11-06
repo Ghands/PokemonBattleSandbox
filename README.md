@@ -42,7 +42,7 @@ chmod +x build.sh build-installer.sh
 | `electron/` | 主进程、preload、引擎/数据管理模块 |
 | `app/` | 前端界面与桥接层 |
 | `engine-host/` | 对战引擎宿主与会话逻辑 |
-| `tools/` | 编译脚本：`build-installer.cjs`、`build-engine.cjs`、`make-icon.cjs`，及鸿蒙相关脚本 |
+| `tools/` | 编译脚本：`build-installer.cjs`、`build-engine.cjs`、`build-env.cjs`（PATH 注入 / 抗占用复制）、`make-icon.cjs`，及鸿蒙相关脚本 |
 | `spike/` | 回归测试 |
 | `build/icon.ico` / `icon.png` | 应用图标（也可由 `tools/make-icon.cjs` 重新生成） |
 | 根目录若干 `.bat/.sh/.ps1` | 原有构建/鸿蒙脚本 |
@@ -111,7 +111,11 @@ chmod +x build.sh build-installer.sh
 
 - **不改动自研源码的构建逻辑**：`tools/build-installer.cjs` 保持原样，它的前置检查本来就能自动编译引擎 `dist`、补齐 `ts-chacha20`、生成图标；`bootstrap.cjs` 负责把「Node + npm 依赖 + PS 源码」准备好，并提前编译 `dist`。
 - **单实例、可重复执行**：每一步都有就绪检测，二次运行不会重复下载；`--force-*` 可强制刷新。
-- **Windows 文件锁容错**：引擎 `dist` 提前编译并静置 3 秒再进入打包；若 `electron-builder` 拷贝 `extraResources` 时仍遇到 `EBUSY`/`EPERM`（实时杀毒或索引服务短暂锁定文件），引导脚本会递增等待并自动重试最多 5 次。在 `AppData\Local\Temp` 这类被重点扫描的目录下实测过：前两次分别在不同文件上触发 `EBUSY`，第三次完成打包；普通目录通常一次通过。
+- **便携 Node 一定能被子进程找到**：`build.bat` / `build.sh` 把下载的 `.runtime/node/` 前置到整条链路的 `PATH`，`bootstrap.cjs` 与 `tools/build-installer.cjs` 再各自兜底一次。原因是 `electron-winstaller` 的安装脚本写死 `node ./script/select-7z-arch.js`，`esbuild-wasm` 也写死 `spawn('node', ['bin/esbuild', ...])`；两者都靠裸 `node` 命令，便携版不在 PATH 时分别报「'node' 不是内部或外部命令」和 `spawn node ENOENT`。已打包客户端里若用 Electron 主程序跑引擎编译且机器上没有 Node，则由 `installNodeSpawnFallback()` 把裸 `node` 重定向到当前可执行文件。
+- **Windows 文件锁容错（分瞬时 / 持久两种）**：引擎编译完成后显式调用 `esbuild.stop()` 停掉长驻服务；所有自研复制改用 `copyFileResilient()`——共享读源文件、写同目录临时文件后原子改名、内容一致则跳过、有限次递增退避重试。`extraResources` 先从 `dist` / `node_modules` 复制到干净的 `.cache/extra-resources/`，避免 `copyfile` 直接打开被实时防护扫描的源文件。打包前还会审计输出目录里被独占锁定的文件。
+  **易踩的坑**：只把暂存区条目写进 `config.extraResources` 是无效的——electron-builder 的 `deepAssign` 对数组采用 `concat` 合并，`package.json` 里指向 `node_modules/esbuild-wasm` 的旧条目仍会执行并报 `EBUSY ... copyfile`。因此 `tools/build-installer.cjs` 会把最终配置写成 `.cache/builder-config/electron-builder-*.json`，并以**字符串路径**传给 `build()`：此时 electron-builder 只读取该文件，不再合并 `package.json` 的 `build` 字段，暂存区条目才真正取代旧条目（日志里的 `loaded configuration file=` 会显示这个路径）。每次写唯一文件名，不覆盖旧文件。
+  **另一个坑**：`extraResources` 会过滤路径中含 `node_modules` 的子目录。`ts-chacha20` 若塞在暂存区的 `engine/node_modules/` 里会被静默丢弃，必须单独作为一条 `{ from: 暂存区/ts-chacha20, to: 'engine/node_modules/ts-chacha20' }`。打包后应核对 `resources/engine/node_modules/ts-chacha20/package.json` 存在。
+  **关键**：实测目标文件被 `FileShare.None` 占用时，`copyfile` / `rename` / 直接写入 / 改名让位全部失败，原地重试再多次也不会解锁，只有写到「另一个路径」才成功。因此引导脚本最多重试 3 次：第 1 次正常、第 2 次短暂等待后原目录重试（治瞬时锁）、第 3 次自动切到全新输出目录 `<out>-retry-1`（治持久锁），并在日志里列出被占用的文件与处置建议。
 - **安全**：GitHub tarball 解压自己实现（USTAR / GNU longname / PAX），过滤 `..`、绝对路径、盘符路径，跳过符号链接；不执行任何远端代码，TypeScript 只由 esbuild-wasm 转译。
 - **不下载 Electron 二进制两次**：`npm install` 时设 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`，Electron 按目标架构由 electron-builder 单独下载并缓存。
 - **避免宿主干扰**：引导脚本清掉 `ELECTRON_RUN_AS_NODE`，否则 electron-builder 会误判运行环境。
@@ -126,6 +130,8 @@ chmod +x build.sh build-installer.sh
 3. 安装包**未做代码签名**，首次运行可能触发 SmartScreen / Gatekeeper 提示。
 4. Windows 主机交叉打 Linux 的 `deb` / `rpm` 需要 `fpm`，`AppImage` 需要 Linux 工具链；默认只出解压即用的 `tar.gz`。
 5. 引擎或数据位置、更新引擎等功能属于**已打包客户端**里的「设置 → 数据设置」，与这个构建包无关；构建包只负责产出安装包。
+6. 若日志出现 `'node' 不是内部或外部命令` / `spawn node ENOENT`（常见于安装 `electron-winstaller` 或编译引擎时），说明 `node` 不在 PATH。直接用 `build.bat` / `build.sh`（它们会自动补 PATH）；若坚持手工调用，先 `set PATH=<便携Node目录>;%PATH%` 或 `export PATH=<便携Node目录>:$PATH`。**不要**用 `node.cmd` 之类的批处理假壳——`child_process.spawn` 无法直接执行 `.cmd` / `.bat`。
+7. 若日志出现 `EBUSY: resource busy or locked, copyfile ...` 且重试无效，说明目标文件被**持久**占用（正在运行的 `PokemonBattleSim.exe`、杀毒实时防护、OneDrive / 网盘同步或索引服务）。此时原地重试无用：关闭相关程序后重试，或让脚本自动切到新输出目录；也可显式 `build.bat --out release-2` 指定一个全新目录。完成后产物目录会在日志末尾明确写出。
 
 ---
 

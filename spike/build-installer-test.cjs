@@ -203,7 +203,8 @@ t('collectArtifacts 只列顶层制品与免安装目录主程序', () => {
 });
 
 t('npm scripts 暴露统一入口', () => {
-	assert.match(PKG.scripts['build:installer'], /build-installer\.cjs/);
+	// 干净构建包通过 bootstrap.cjs 转发（会先补齐依赖与源码），原项目直接调编译脚本。
+	assert.match(PKG.scripts['build:installer'], /bootstrap\.cjs|build-installer\.cjs/);
 	assert.match(PKG.scripts['dist:all'], /--os all --arch all/);
 });
 
